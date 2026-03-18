@@ -1,0 +1,132 @@
+# Copyright (c) Microsoft. All rights reserved.
+
+import asyncio
+import os
+
+import asyncio
+from dotenv import load_dotenv
+from agent_framework import Agent, Annotation
+from agent_framework.azure import AzureAIAgentClient
+from azure.identity.aio import AzureCliCredential
+from agent_framework.observability import get_tracer, get_meter
+from opentelemetry.trace import SpanKind
+from opentelemetry.trace.span import format_trace_id
+
+# Load environment variables from .env file
+load_dotenv()
+from azure.monitor.opentelemetry import configure_azure_monitor
+from agent_framework.observability import create_resource, enable_instrumentation
+# read connection string from env var 
+connection_string = os.getenv("AZURE_MONITOR_CONNECTION_STRING")
+configure_azure_monitor(
+    connection_string=connection_string,
+    resource=create_resource(),  # Uses OTEL_SERVICE_NAME, etc.
+    enable_live_metrics=True,
+)
+
+# Then activate Agent Framework's telemetry code paths
+# This is optional if ENABLE_INSTRUMENTATION and/or ENABLE_SENSITIVE_DATA are set in env vars
+enable_instrumentation(enable_sensitive_data=True)
+
+"""
+This sample demonstrates how to create an Azure AI agent that uses Bing Grounding
+search to find real-time information from the web with comprehensive citation support.
+It shows how to extract and display citations (title, URL, and snippet) from Bing
+Grounding responses, enabling users to verify sources and explore referenced content.
+
+Prerequisites:
+1. A connected Grounding with Bing Search resource in your Azure AI project
+2. Set BING_CONNECTION_ID environment variable
+   Example: BING_CONNECTION_ID="your-bing-connection-id"
+
+To set up Bing Grounding:
+1. Go to Azure AI Foundry portal (https://ai.azure.com)
+2. Navigate to your project's "Connected resources" section
+3. Add a new connection for "Grounding with Bing Search"
+4. Copy the connection ID and set the BING_CONNECTION_ID environment variable
+"""
+
+async def run_agent_with_citations(agent: Agent, user_input: str) -> list[Annotation]:
+    """Run agent with user input and return citations.
+    
+    Args:
+        agent: The agent instance to run
+        user_input: The user's question or input
+        
+    Returns:
+        List of annotations/citations from the response
+    """
+    with get_tracer().start_as_current_span("agent_framework_v1_trace", kind=SpanKind.CLIENT) as current_span:
+        print(f"Trace ID: {format_trace_id(current_span.get_span_context().trace_id)}")
+        citations: list[Annotation] = []
+        chunk_count = 0
+        
+        # Stream the response and collect citations
+        async for chunk in agent.run(user_input, stream=True):
+            if chunk.text:
+                print(chunk.text, end="", flush=True)
+
+            # Collect citations from Bing Grounding responses
+            for content in getattr(chunk, "contents", []):
+                annotations = getattr(content, "annotations", [])
+                if annotations:
+                    citations.extend(annotations)
+
+        print()
+
+        # Display collected citations
+        if citations:
+            print("\n\nCitations:")
+            for i, citation in enumerate(citations, 1):
+                print(f"[{i}] {citation['title']}: {citation.get('url')}")
+
+        else:
+            print("\nNo citations found in the response.")
+
+        print()
+        
+        return citations
+
+async def main() -> None:
+    """Main function demonstrating Azure AI agent with Bing Grounding search."""
+    # 1. Create Bing Grounding search tool using HostedWebSearchTool
+    # The connection ID will be automatically picked up from environment variable
+    # bing_search_tool = HostedWebSearchTool(
+    #     name="Bing Grounding Search",
+    #     description="Search the web for current information using Bing",
+    # )
+    # read agent is from env
+    
+    agent_id = os.getenv("AZURE_AGENT_ID")
+
+    # 2. Use AzureAIAgentClient as async context manager for automatic cleanup
+    project_endpoint = os.getenv("AZURE_PROJECT_ENDPOINT")
+
+    async with (
+        AzureAIAgentClient(
+            project_endpoint=project_endpoint,
+            credential=AzureCliCredential(),
+
+            agent_id=agent_id
+        ) as client,
+        Agent(
+            client=client,
+            agent_id=agent_id
+        ) as agent,
+    ):
+        # 3. Demonstrate agent capabilities with web search
+        print("=== Azure AI Agent with Bing Grounding Search ===\n")
+
+        user_input = "How do i get a passport"
+        print(f"User: {user_input}")
+
+        # Stream the response and collect citations
+        citations = await run_agent_with_citations(agent, user_input)
+        user_input = "How do i get a new drivers license"
+        print(f"User: {user_input}")
+        citations = await run_agent_with_citations(agent, user_input)
+        print()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
